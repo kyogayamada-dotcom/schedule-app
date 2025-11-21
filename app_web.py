@@ -215,7 +215,7 @@ def create_student_req_df(student_names):
 # 4. メインアプリ (Streamlit)
 # ==========================================
 st.set_page_config(page_title="時間割作成", layout="wide")
-st.title("📱 個別指導塾ゴールフリー 時間割作成 ")
+st.title("📱 個別指導塾 時間割作成")
 
 # --- セッション状態の初期化 ---
 weeks_info = get_week_ranges()
@@ -257,77 +257,80 @@ if st.session_state.teacher_weekly_data is None:
 else:
     tab1, tab2, tab3, tab4 = st.tabs(["📅 先生シフト", "🔢 生徒希望数", "🙋‍♂️ 生徒シフト", "🚀 作成＆結果"])
 
-    # --- Tab 1: コーチシフト (全週表示) ---
+    # --- Tab 1: 先生シフト (Form使用) ---
     with tab1:
         st.subheader(f"{teacher_name}コーチの予定")
-        st.caption("（〇=2人, △=1人, ×=休み）")
+        st.info("💡 入力後に必ず下の「保存」ボタンを押してください。")
         
-        # ループで全ての週を表示
-        for w in weeks_info:
-            label = w["label"]
-            st.write(f"**{label}**") # 週のラベル
-            
-            df = st.session_state.teacher_weekly_data[label]
-            
-            # Data Editor設定
-            column_config = {}
-            options = ["〇", "×", "△"]
-            for col in df.columns:
-                column_config[col] = st.column_config.SelectboxColumn(col, options=options, width="small", required=True)
-
-            # unique keyを使って各週を識別
-            edited_df = st.data_editor(
-                df, 
-                column_config=column_config, 
-                use_container_width=True, 
-                key=f"teacher_edit_{label}", # キーを一意にする
-                height=300
-            )
-            st.session_state.teacher_weekly_data[label] = edited_df
-            st.divider() # 区切り線
-
-    # --- Tab 2: 生徒希望数 ---
-    with tab2:
-        st.subheader("各教科の必要コマ数")
-        edited_req_df = st.data_editor(
-            st.session_state.student_req_df, hide_index=True, use_container_width=True
-        )
-        st.session_state.student_req_df = edited_req_df
-
-    # --- Tab 3: 生徒シフト (全週表示) ---
-    with tab3:
-        st.subheader("生徒の行ける日時")
-        target_student = st.selectbox("生徒を選択してください", st.session_state.student_list)
-        
-        if target_student:
-            st.caption(f"{target_student} の行ける時間 (〇 = OK / × = NG)")
-            
+        with st.form("teacher_form"):
+            updated_weekly_data = {}
             for w in weeks_info:
                 label = w["label"]
                 st.write(f"**{label}**")
-                
-                s_df = st.session_state.student_weekly_data[target_student][label]
-                
-                column_config_s = {}
-                options = ["〇", "×"]
-                for col in s_df.columns:
-                    column_config_s[col] = st.column_config.SelectboxColumn(col, options=options, width="small", required=True)
-
-                edited_s_df = st.data_editor(
-                    s_df, 
-                    column_config=column_config_s, 
-                    use_container_width=True,
-                    key=f"student_edit_{target_student}_{label}", # キーを一意にする
-                    height=300
+                df = st.session_state.teacher_weekly_data[label]
+                column_config = {}
+                options = ["〇", "×", "△"]
+                for col in df.columns:
+                    column_config[col] = st.column_config.SelectboxColumn(col, options=options, width="small", required=True)
+                edited_df = st.data_editor(
+                    df, column_config=column_config, use_container_width=True, key=f"teacher_edit_{label}", height=300
                 )
-                st.session_state.student_weekly_data[target_student][label] = edited_s_df
+                updated_weekly_data[label] = edited_df
                 st.divider()
+            
+            submitted = st.form_submit_button("💾 入力内容を保存する", type="primary")
+            if submitted:
+                st.session_state.teacher_weekly_data = updated_weekly_data
+                st.success("{teacher_name}コーチのシフトを保存しました！")
+
+    # --- Tab 2: 生徒希望数 (Form使用) ---
+    with tab2:
+        st.subheader("各教科の必要コマ数")
+        st.info("💡 入力後に必ず下の「保存」ボタンを押してください。")
+        with st.form("req_form"):
+            edited_req_df = st.data_editor(
+                st.session_state.student_req_df, hide_index=True, use_container_width=True
+            )
+            submitted_req = st.form_submit_button("💾 希望数を保存する", type="primary")
+            if submitted_req:
+                st.session_state.student_req_df = edited_req_df
+                st.success("生徒の希望数を保存しました！")
+
+    # --- Tab 3: 生徒シフト (Form使用) ---
+    with tab3:
+        st.subheader("生徒の行ける日時")
+        target_student = st.selectbox("生徒を選択してください", st.session_state.student_list)
+        if target_student:
+            st.caption(f"{target_student} の行ける時間 (〇 = OK / × = NG)")
+            st.info("💡 入力後に必ず下の「保存」ボタンを押してください。")
+            
+            with st.form(f"student_form_{target_student}"):
+                updated_s_weekly = {}
+                for w in weeks_info:
+                    label = w["label"]
+                    st.write(f"**{label}**")
+                    s_df = st.session_state.student_weekly_data[target_student][label]
+                    column_config_s = {}
+                    options = ["〇", "×"]
+                    for col in s_df.columns:
+                        column_config_s[col] = st.column_config.SelectboxColumn(col, options=options, width="small", required=True)
+                    edited_s_df = st.data_editor(
+                        s_df, column_config=column_config_s, use_container_width=True,
+                        key=f"student_edit_{target_student}_{label}", height=300
+                    )
+                    updated_s_weekly[label] = edited_s_df
+                    st.divider()
+                
+                submitted_s = st.form_submit_button(f"💾 {target_student} のシフトを保存する", type="primary")
+                if submitted_s:
+                    st.session_state.student_weekly_data[target_student] = updated_s_weekly
+                    st.success(f"{target_student} のシフトを保存しました！")
 
     # --- Tab 4: 作成実行 & 結果表示 ---
     with tab4:
         st.subheader("時間割作成")
         
-        if st.button("作成スタート", type="primary"):
+        if st.button("🚀 作成スタート", type="primary"):
             with st.spinner("計算中..."):
                 try:
                     schedule_map, all_dates, unscheduled = calculate_schedule(
@@ -337,9 +340,9 @@ else:
                         teacher_name
                     )
                     
-                    st.success("✅ 完成しました！")
+                    st.success("✅ 完成しました！ 結果は以下に表示されます。")
                     
-                    # === A. 画面上でのカレンダー表示 ===
+                    # === A. 画面上でのカレンダー表示 (列幅調整版) ===
                     st.divider()
                     st.subheader("📅 完成時間割プレビュー")
                     
@@ -351,13 +354,20 @@ else:
                         cal_dates.append(curr)
                         curr += datetime.timedelta(days=1)
 
+                    # 7日ごとにループして表示
                     for i in range(0, len(cal_dates), 7):
                         week_dates = cal_dates[i : i+7]
                         
                         week_data = {}
                         col_names = [d.strftime("%m/%d(%a)") for d in week_dates]
                         
+                        # 列設定 (全ての列をmedium幅に指定して潰れるのを防ぐ)
+                        col_config = {}
+
                         for d_obj, col in zip(week_dates, col_names):
+                            # ここで width="medium" を指定
+                            col_config[col] = st.column_config.TextColumn(col, width="medium")
+                            
                             col_content = []
                             for p in range(1, 7):
                                 assigned = schedule_map.get((d_obj, p), [])
@@ -371,7 +381,11 @@ else:
                         df_week_view = pd.DataFrame(week_data, index=[f"{p}講" for p in range(1, 7)])
                         
                         st.write(f"**{week_dates[0].strftime('%Y/%m/%d')} 週**")
-                        st.dataframe(df_week_view, use_container_width=True)
+                        st.dataframe(
+                            df_week_view, 
+                            column_config=col_config,  # 設定を適用
+                            use_container_width=True
+                        )
                         st.write("") 
 
                     if unscheduled:
