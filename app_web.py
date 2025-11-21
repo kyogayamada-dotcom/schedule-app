@@ -3,15 +3,14 @@ import pandas as pd
 import datetime
 import io
 import re
+import random
 from collections import Counter
 
 # ==========================================
-# ロジック部分
+# 1. カレンダー・ロジック設定
 # ==========================================
 def get_open_periods(date_obj):
-    """
-    日付ごとの開講コマ定義
-    """
+    """日付ごとの開講コマ定義"""
     m, d = date_obj.month, date_obj.day
 
     # 1. 1月7, 8, 9日は 3,4,5,6講
@@ -25,345 +24,396 @@ def get_open_periods(date_obj):
     # 3. 特定の日付の1,2講をバツにする
     if (m == 12 and d in [20, 21, 27]) or (m == 1 and d in [4, 10, 11]):
         return [3, 4, 5]
-    
     if (m == 12 and d in [25, 26]) or (m == 1 and d == 6):
         return [3, 4, 5, 6]
-
     if m == 12 and d == 28:
         return [3, 4]
 
-    # 4-6講のみ
+    # 4. 通常ルール
     if (m == 12 and (2<=d<=5 or 9<=d<=12 or 16<=d<=19)) or \
        (m == 1 and (13<=d<=16 or 20<=d<=23 or 27<=d<=30)):
         return [4, 5, 6]
-
-    # 2-5講のみ
+    
     if (m == 12 and d in [6, 13]) or (m == 1 and d in [17, 24, 31]):
         return [2, 3, 4, 5]
 
     return []
 
-def create_template_data(teacher_name, student_names_list):
-    # 期間設定
-    curr = datetime.date(2025, 12, 1)
-    end = datetime.date(2026, 1, 31)
+# ==========================================
+# 2. データ処理・計算ロジック
+# ==========================================
+def calculate_schedule(teacher_weekly_data, req_df, student_weekly_data, teacher_name):
     
-    # 日付リスト作成 (ヘッダー用)
-    date_headers = []
-    date_objs = []
-    temp_curr = curr
-    while temp_curr <= end:
-        # 日付文字列 (例: 12/01(Mon))
-        d_str = temp_curr.strftime("%m/%d(%a)")
-        date_headers.append(d_str)
-        date_objs.append(temp_curr)
-        temp_curr += datetime.timedelta(days=1)
-
-    # ---------------------------
-    # 1. 先生シフト (縦:講, 横:日付)
-    # ---------------------------
-    # 行データを作成 (1講〜6講)
-    rows_shift = []
-    for p in range(1, 7):
-        row_data = {"講": p}
-        for d_str, d_obj in zip(date_headers, date_objs):
-            open_periods = get_open_periods(d_obj)
-            # 開講なら〇、閉講なら×
-            row_data[d_str] = "〇" if p in open_periods else "×"
-        rows_shift.append(row_data)
-    
-    # カラム順序を保証
-    cols_order = ["講"] + date_headers
-    df_template = pd.DataFrame(rows_shift)
-    df_template = df_template[cols_order]
-
-    # ---------------------------
-    # 2. 生徒希望数
-    # ---------------------------
-    student_data = []
-    for name in student_names_list:
-        name = name.strip()
-        if name:
-            student_data.append({
-                "生徒名": name, "国語": 0, "数学": 0, "英語": 0, "理科": 0, "社会": 0
-            })
-    if not student_data:
-        student_data.append({"生徒名": "サンプル生", "国語": 0, "数学": 0, "英語": 0, "理科": 0, "社会": 0})
-    df_req = pd.DataFrame(student_data)
-
-    # ---------------------------
-    # 3. Excel出力
-    # ---------------------------
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # 先生シフト
-        df_template.to_excel(writer, sheet_name="先生シフト", index=False)
-        
-        # 生徒希望数
-        df_req.to_excel(writer, sheet_name="生徒希望数", index=False)
-        
-        # 生徒ごとのシフトシート (先生と同じ形式)
-        for s_info in student_data:
-            sheet_name = f"シフト_{s_info['生徒名']}"[:31]
-            df_template.to_excel(writer, sheet_name=sheet_name, index=False)
-
-    return output.getvalue()
-
-def process_schedule(uploaded_file, teacher_name):
-    xl = pd.ExcelFile(uploaded_file)
-    sheet_names = xl.sheet_names
-
-    # 読み込み
-    df_teacher = pd.read_excel(uploaded_file, sheet_name="先生シフト")
-    df_req = pd.read_excel(uploaded_file, sheet_name="生徒希望数")
-
-    # 日付カラムを特定する関数
-    # (Excelで日付がシリアル値やdatetimeになったり文字列になったりするため)
-    def is_date_column(col_name):
-        # "講" 以外を日付とみなす
-        return str(col_name) != "講"
-
-    # 日付カラムのマッピング作成 (カラム名 -> datetimeオブジェクト)
-    # 形式: "12/01(Mon)" -> datetime.date(2025, 12, 1)
-    date_map = {}
-    # 2025/12/1から開始と仮定してマッピング（簡易的だが確実）
-    # もしExcelの日付ヘッダーが日付型で認識されている場合はそのまま使う
-    
-    # 列名リストから日付っぽいものを抽出
-    date_cols = [c for c in df_teacher.columns if is_date_column(c)]
-    
-    # 列名から日付オブジェクトへの変換を試みる
-    # ここではテンプレート通りの順番であると仮定して、開始日から割り当てるのが安全
-    curr = datetime.date(2025, 12, 1)
-    for col in date_cols:
-        # もし列名自体がdatetime型ならそれを使う
-        if isinstance(col, datetime.datetime):
-            date_map[col] = col.date()
-        else:
-            # 文字列の場合は、ループ順に日付を割り当てる（テンプレートの仕様依存）
-            date_map[col] = curr
-            curr += datetime.timedelta(days=1)
-
-    # A. 先生シフト解析 (横軸日付版)
+    # A. 先生シフト解析
     teacher_capacity = {}
     
-    for _, row in df_teacher.iterrows():
-        try:
-            p_num = int(row['講'])
-        except:
-            continue # 講が数値でない行はスキップ
+    for week_label, df in teacher_weekly_data.items():
+        for date_str in df.columns:
+            match = re.search(r"(\d+)/(\d+)", date_str)
+            if not match: continue
+            m, d = int(match.group(1)), int(match.group(2))
+            y = 2025 if m == 12 else 2026
+            try: d_date = datetime.date(y, m, d)
+            except: continue
             
-        for col in date_cols:
-            d = date_map[col]
-            val = str(row[col]).strip()
+            open_periods = get_open_periods(d_date)
             
-            # 開講日チェック
-            if p_num not in get_open_periods(d):
-                continue
+            for p in range(1, 7):
+                try: val = str(df.loc[p, date_str])
+                except: continue
+                
+                if p not in open_periods: continue
+                
+                if any(x in val for x in ["〇", "○", "OK", "全"]):
+                    teacher_capacity[(d_date, p)] = 2
+                elif any(x in val for x in ["△", "▲", "半", "1"]):
+                    teacher_capacity[(d_date, p)] = 1
 
-            # 人数判定
-            nums = re.findall(r'[0-9]+', val)
-            if nums:
-                teacher_capacity[(d, p_num)] = int(nums[0])
-            elif any(x in val for x in ["〇", "○", "OK", "全"]):
-                teacher_capacity[(d, p_num)] = 2 
-            elif any(x in val for x in ["△", "▲", "半"]):
-                teacher_capacity[(d, p_num)] = 1
-
-    # B. 生徒データ & シフト解析
+    # 全スロット作成
+    all_slots = []
+    for (d, p), cap in teacher_capacity.items():
+        all_slots.append((d, p, cap))
+    
+    # B. 生徒データ解析
     students = {}
-    student_availability = {} 
-
-    for _, row in df_req.iterrows():
+    for _, row in req_df.iterrows():
         name = row['生徒名']
-        reqs = {k: row.get(k, 0) for k in ["国語", "数学", "英語", "理科", "社会"]}
+        reqs = {k: int(row.get(k, 0)) for k in ["国語", "数学", "英語", "理科", "社会"]}
         students[name] = {"reqs": reqs, "remaining": sum(reqs.values())}
 
-        sheet_name = f"シフト_{name}"[:31]
-        
-        # シート名マッチング
-        target_sheet = None
-        if sheet_name in sheet_names:
-            target_sheet = sheet_name
-        
-        if target_sheet:
-            df_s = pd.read_excel(uploaded_file, sheet_name=target_sheet)
-            # 生徒シフト読み込み
-            s_date_cols = [c for c in df_s.columns if is_date_column(c)]
-            
-            # 生徒シートの日付マッピングも再構築
-            s_date_map = {}
-            curr_s = datetime.date(2025, 12, 1)
-            for col in s_date_cols:
-                if isinstance(col, datetime.datetime):
-                    s_date_map[col] = col.date()
-                else:
-                    s_date_map[col] = curr_s
-                    curr_s += datetime.timedelta(days=1)
-
-            for _, s_row in df_s.iterrows():
-                try:
-                    p_num = int(s_row['講'])
-                except:
-                    continue
+    # C. 生徒シフト解析
+    student_availability = {}
+    for s_name, weekly_data in student_weekly_data.items():
+        if not weekly_data: continue
+        for week_label, df in weekly_data.items():
+            for date_str in df.columns:
+                match = re.search(r"(\d+)/(\d+)", date_str)
+                if not match: continue
+                m, d = int(match.group(1)), int(match.group(2))
+                y = 2025 if m == 12 else 2026
+                try: d_date = datetime.date(y, m, d)
+                except: continue
                 
-                for col in s_date_cols:
-                    d = s_date_map[col]
-                    val = str(s_row[col]).strip()
+                for p in range(1, 7):
+                    try: val = str(df.loc[p, date_str])
+                    except: continue
                     
-                    if any(x in val for x in ["〇", "○", "OK", "1", "2", "3", "全"]):
-                        student_availability[(name, d, p_num)] = True
+                    if any(x in val for x in ["〇", "○", "OK", "△", "▲", "1", "2", "3", "全"]):
+                        student_availability[(s_name, d_date, p)] = True
                     else:
-                        student_availability[(name, d, p_num)] = False
+                        student_availability[(s_name, d_date, p)] = False
 
-    # D. 作成
-    # 結果格納用マップ: schedule_map[(date, period)] = [生徒名(科目), ...]
-    schedule_map = {}
+    # D. 計算 (連続性重視)
+    schedule_map = { (d, p): [] for d, p, cap in all_slots }
+    date_counts = Counter()
+    daily_student_counts = Counter()
+    random.seed(42)
 
-    curr = datetime.date(2025, 12, 1)
-    end_date = datetime.date(2026, 1, 31)
-    
-    while curr <= end_date:
-        periods = get_open_periods(curr)
-        daily_counts = Counter()
+    max_loops = 3000
+    loop_count = 0
+
+    while loop_count < max_loops:
+        loop_count += 1
+        assigned_in_this_loop = False
         
-        for p in periods:
-            capacity = teacher_capacity.get((curr, p), 0)
-            if capacity == 0: continue
-            
-            cands = []
+        def get_slot_priority(slot):
+            d, p, cap = slot
+            if len(schedule_map[(d, p)]) >= cap: return -99999
+            score = 0
+            if len(schedule_map.get((d, p-1), [])) > 0: score += 100
+            if len(schedule_map.get((d, p+1), [])) > 0: score += 100
+            score += date_counts[d] * 10
+            score += random.random()
+            return score
+
+        all_slots.sort(key=get_slot_priority, reverse=True)
+
+        for d, p, cap in all_slots:
+            current_assigned = schedule_map[(d, p)]
+            if len(current_assigned) >= cap: continue
+
+            candidates = []
             for s_name, data in students.items():
                 if data["remaining"] <= 0: continue
-                if daily_counts[s_name] >= 3: continue
+                if daily_student_counts[(s_name, d)] >= 3: continue
+                if not student_availability.get((s_name, d, p), False): continue
                 
-                if not student_availability.get((s_name, curr, p), False):
-                    continue
+                is_already_in = False
+                for entry in current_assigned:
+                    if entry.startswith(s_name + "("):
+                        is_already_in = True; break
+                if is_already_in: continue
 
-                cands.append(s_name)
+                candidates.append(s_name)
             
-            cands.sort(key=lambda x: students[x]["remaining"], reverse=True)
-            
-            assigned = []
-            while len(assigned) < capacity and cands:
-                s = cands.pop(0)
-                items = sorted([(v, k) for k, v in students[s]["reqs"].items() if v > 0], reverse=True)
-                if not items: continue
-                subj = items[0][1]
-                
-                students[s]["reqs"][subj] -= 1
-                students[s]["remaining"] -= 1
-                daily_counts[s] += 1
-                assigned.append(f"{s}({subj})")
-            
-            if assigned:
-                schedule_map[(curr, p)] = assigned
-                
-        curr += datetime.timedelta(days=1)
+            if not candidates: continue
 
-    # E. 出力データ作成 (横軸日付形式)
-    
-    # 1. 時間割表 (Rows=講, Cols=日付)
-    out_rows = []
-    
-    # 日付ヘッダー再作成
-    out_date_headers = []
-    out_dates = []
-    temp_curr = datetime.date(2025, 12, 1)
-    while temp_curr <= end_date:
-        d_str = temp_curr.strftime("%m/%d(%a)")
-        out_date_headers.append(d_str)
-        out_dates.append(temp_curr)
-        temp_curr += datetime.timedelta(days=1)
+            candidates.sort(key=lambda x: (students[x]["remaining"], random.random()), reverse=True)
+            
+            s = candidates[0]
+            items = sorted([(v, k) for k, v in students[s]["reqs"].items() if v > 0], reverse=True)
+            if not items: continue
+            subj = items[0][1]
+
+            students[s]["reqs"][subj] -= 1
+            students[s]["remaining"] -= 1
+            daily_student_counts[(s, d)] += 1
+            date_counts[d] += 1
+            
+            schedule_map[(d, p)].append(f"{s}({subj})")
+            assigned_in_this_loop = True
+            break
         
-    for p in range(1, 7):
-        row_data = {"講": p}
-        for d_str, d_obj in zip(out_date_headers, out_dates):
-            assigned_list = schedule_map.get((d_obj, p), [])
-            if assigned_list:
-                # セル内で改行して表示
-                row_data[d_str] = "\n".join(assigned_list)
-            else:
-                # 開講してるけど誰もいないなら空欄、閉講なら斜線など
-                if p in get_open_periods(d_obj):
-                    row_data[d_str] = ""
-                else:
-                    row_data[d_str] = "×"
-        out_rows.append(row_data)
-        
-    df_schedule = pd.DataFrame(out_rows)
-    df_schedule = df_schedule[["講"] + out_date_headers]
+        if not assigned_in_this_loop: break
 
-    # 2. 未消化リスト
+    # E. 結果整形
+    all_dates = sorted(list(set([x[0] for x in all_slots])))
     unscheduled = []
     for s, data in students.items():
         for subj, cnt in data["reqs"].items():
             if cnt > 0: unscheduled.append({"生徒名": s, "科目": subj, "不足": cnt})
-    df_unscheduled = pd.DataFrame(unscheduled)
-
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # セル内改行を有効にするためのフォーマット設定は xlsxwriter の機能を使う必要があるが
-        # Pandasのto_excelだけでは限界があるため、標準的な出力を行う
-        df_schedule.to_excel(writer, sheet_name="時間割(横日付)", index=False)
-        
-        # 列幅調整などの見た目を整える（簡易的）
-        workbook = writer.book
-        worksheet = writer.sheets["時間割(横日付)"]
-        wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'top'})
-        
-        # データ範囲に折り返し設定を適用
-        # (列数が多いのでざっくり全体に適用)
-        worksheet.set_column(1, len(out_date_headers), 15, wrap_format)
-
-        if not df_unscheduled.empty:
-            df_unscheduled.to_excel(writer, sheet_name="未消化リスト", index=False)
     
-    return output.getvalue()
+    return schedule_map, all_dates, unscheduled
 
 # ==========================================
-# Web画面 (Streamlit)
+# 3. UIヘルパー関数
 # ==========================================
-st.title("個別指導塾 時間割作成ツール (横日付版)")
-st.write("Excelの形式を「横軸＝日付」に変更しました。")
+def get_week_ranges():
+    start_date = datetime.date(2025, 12, 1)
+    end_date = datetime.date(2026, 1, 31)
+    weeks = []
+    current_dates = []
+    curr = start_date
+    while curr <= end_date:
+        current_dates.append(curr)
+        if len(current_dates) == 7 or curr == end_date:
+            label = f"{current_dates[0].strftime('%m/%d')} 〜 {current_dates[-1].strftime('%m/%d')}"
+            weeks.append({"label": label, "dates": current_dates})
+            current_dates = []
+        curr += datetime.timedelta(days=1)
+    return weeks
 
-teacher_name = st.text_input("先生の名前を入力してください", "佐藤")
+def create_weekly_df(dates):
+    col_names = [d.strftime("%m/%d(%a)") for d in dates]
+    data = {}
+    for d_obj, col in zip(dates, col_names):
+        open_periods = get_open_periods(d_obj)
+        col_data = []
+        for p in range(1, 7):
+            val = "〇" if p in open_periods else "×"
+            col_data.append(val)
+        data[col] = col_data
+    return pd.DataFrame(data, index=[1, 2, 3, 4, 5, 6])
 
-st.divider()
+def create_student_req_df(student_names):
+    data = []
+    for name in student_names:
+        data.append({"生徒名": name, "国語": 0, "数学": 0, "英語": 0, "理科": 0, "社会": 0})
+    return pd.DataFrame(data)
 
-st.subheader("ステップ1: 入力用Excelを作る")
+# ==========================================
+# 4. メインアプリ (Streamlit)
+# ==========================================
+st.set_page_config(page_title="時間割作成", layout="wide")
+st.title("📱 個別指導塾ゴールフリー 時間割作成 ")
 
-default_students = "山田くん\n田中さん\n高橋くん"
-student_input = st.text_area("生徒の名前を入力してください（改行で区切る）", default_students, height=100)
+# --- セッション状態の初期化 ---
+weeks_info = get_week_ranges()
 
-if st.button("入力用ひな形をダウンロード"):
-    student_list = [s.strip() for s in student_input.split('\n') if s.strip()]
-    excel_data = create_template_data(teacher_name, student_list)
+if "teacher_weekly_data" not in st.session_state: st.session_state.teacher_weekly_data = None
+if "student_req_df" not in st.session_state: st.session_state.student_req_df = None
+if "student_weekly_data" not in st.session_state: st.session_state.student_weekly_data = {}
+if "student_list" not in st.session_state: st.session_state.student_list = []
+
+# --- サイドバー ---
+with st.sidebar:
+    st.header("1. 基本設定")
+    teacher_name = st.text_input("コーチの名前", "佐藤")
+    st.subheader("生徒リスト")
+    default_students = "山田くん\n田中さん\n高橋くん"
+    s_input = st.text_area("名前を入力 (改行区切り)", default_students, height=100)
     
-    st.download_button(
-        label=f"📥 入力表をダウンロード",
-        data=excel_data,
-        file_name=f"入力表_{teacher_name}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-    st.info("Excelの「横方向」に日付が並んでいます。")
+    if st.button("入力を開始/リセット"):
+        new_list = [s.strip() for s in s_input.split('\n') if s.strip()]
+        st.session_state.student_list = new_list
+        
+        t_data = {}
+        for w in weeks_info: t_data[w["label"]] = create_weekly_df(w["dates"])
+        st.session_state.teacher_weekly_data = t_data
+        
+        st.session_state.student_req_df = create_student_req_df(new_list)
+        
+        s_data_all = {}
+        for s in new_list:
+            s_weeks = {}
+            for w in weeks_info: s_weeks[w["label"]] = create_weekly_df(w["dates"])
+            s_data_all[s] = s_weeks
+        st.session_state.student_weekly_data = s_data_all
+        st.success("リセットしました。")
 
-st.divider()
+# --- メインエリア ---
+if st.session_state.teacher_weekly_data is None:
+    st.info("👈 左のサイドバーで生徒名を入力し、「入力を開始」ボタンを押してください。")
+else:
+    tab1, tab2, tab3, tab4 = st.tabs(["📅 先生シフト", "🔢 生徒希望数", "🙋‍♂️ 生徒シフト", "🚀 作成＆結果"])
 
-st.subheader("ステップ2: 作成実行")
-uploaded_file = st.file_uploader("Excelをアップロード", type=["xlsx"])
+    # --- Tab 1: コーチシフト (全週表示) ---
+    with tab1:
+        st.subheader(f"{teacher_name}コーチの予定")
+        st.caption("（〇=2人, △=1人, ×=休み）")
+        
+        # ループで全ての週を表示
+        for w in weeks_info:
+            label = w["label"]
+            st.write(f"**{label}**") # 週のラベル
+            
+            df = st.session_state.teacher_weekly_data[label]
+            
+            # Data Editor設定
+            column_config = {}
+            options = ["〇", "×", "△"]
+            for col in df.columns:
+                column_config[col] = st.column_config.SelectboxColumn(col, options=options, width="small", required=True)
 
-if uploaded_file is not None:
-    if st.button("時間割を作成する"):
-        with st.spinner('計算中...'):
-            try:
-                excel_binary = process_schedule(uploaded_file, teacher_name)
-                st.success("✅ 作成完了！")
+            # unique keyを使って各週を識別
+            edited_df = st.data_editor(
+                df, 
+                column_config=column_config, 
+                use_container_width=True, 
+                key=f"teacher_edit_{label}", # キーを一意にする
+                height=300
+            )
+            st.session_state.teacher_weekly_data[label] = edited_df
+            st.divider() # 区切り線
 
-                st.download_button(
-                    label="📥 完成時間割をダウンロード",
-                    data=excel_binary,
-                    file_name=f"完成時間割_{teacher_name}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    # --- Tab 2: 生徒希望数 ---
+    with tab2:
+        st.subheader("各教科の必要コマ数")
+        edited_req_df = st.data_editor(
+            st.session_state.student_req_df, hide_index=True, use_container_width=True
+        )
+        st.session_state.student_req_df = edited_req_df
+
+    # --- Tab 3: 生徒シフト (全週表示) ---
+    with tab3:
+        st.subheader("生徒の行ける日時")
+        target_student = st.selectbox("生徒を選択してください", st.session_state.student_list)
+        
+        if target_student:
+            st.caption(f"{target_student} の行ける時間 (〇 = OK / × = NG)")
+            
+            for w in weeks_info:
+                label = w["label"]
+                st.write(f"**{label}**")
+                
+                s_df = st.session_state.student_weekly_data[target_student][label]
+                
+                column_config_s = {}
+                options = ["〇", "×"]
+                for col in s_df.columns:
+                    column_config_s[col] = st.column_config.SelectboxColumn(col, options=options, width="small", required=True)
+
+                edited_s_df = st.data_editor(
+                    s_df, 
+                    column_config=column_config_s, 
+                    use_container_width=True,
+                    key=f"student_edit_{target_student}_{label}", # キーを一意にする
+                    height=300
                 )
-            except Exception as e:
-                st.error(f"エラー: {e}")
+                st.session_state.student_weekly_data[target_student][label] = edited_s_df
+                st.divider()
+
+    # --- Tab 4: 作成実行 & 結果表示 ---
+    with tab4:
+        st.subheader("時間割作成")
+        
+        if st.button("作成スタート", type="primary"):
+            with st.spinner("計算中..."):
+                try:
+                    schedule_map, all_dates, unscheduled = calculate_schedule(
+                        st.session_state.teacher_weekly_data,
+                        st.session_state.student_req_df,
+                        st.session_state.student_weekly_data,
+                        teacher_name
+                    )
+                    
+                    st.success("✅ 完成しました！")
+                    
+                    # === A. 画面上でのカレンダー表示 ===
+                    st.divider()
+                    st.subheader("📅 完成時間割プレビュー")
+                    
+                    start_date = datetime.date(2025, 12, 1)
+                    end_date = datetime.date(2026, 1, 31)
+                    cal_dates = []
+                    curr = start_date
+                    while curr <= end_date:
+                        cal_dates.append(curr)
+                        curr += datetime.timedelta(days=1)
+
+                    for i in range(0, len(cal_dates), 7):
+                        week_dates = cal_dates[i : i+7]
+                        
+                        week_data = {}
+                        col_names = [d.strftime("%m/%d(%a)") for d in week_dates]
+                        
+                        for d_obj, col in zip(week_dates, col_names):
+                            col_content = []
+                            for p in range(1, 7):
+                                assigned = schedule_map.get((d_obj, p), [])
+                                if assigned:
+                                    col_content.append(", ".join(assigned))
+                                else:
+                                    open_periods = get_open_periods(d_obj)
+                                    col_content.append("-" if p in open_periods else "×")
+                            week_data[col] = col_content
+                        
+                        df_week_view = pd.DataFrame(week_data, index=[f"{p}講" for p in range(1, 7)])
+                        
+                        st.write(f"**{week_dates[0].strftime('%Y/%m/%d')} 週**")
+                        st.dataframe(df_week_view, use_container_width=True)
+                        st.write("") 
+
+                    if unscheduled:
+                        st.error("⚠️ 入りきらなかった授業があります")
+                        st.dataframe(pd.DataFrame(unscheduled), hide_index=True)
+                    else:
+                        st.info("🎉 全ての授業が割り当てられました！")
+
+                    # === B. Excel出力 ===
+                    st.divider()
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                        workbook = writer.book
+                        worksheet = workbook.add_worksheet("時間割")
+                        writer.sheets["時間割"] = worksheet
+                        wrap_fmt = workbook.add_format({'text_wrap': True, 'valign': 'top', 'border': 1, 'align': 'center'})
+                        header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D9E1F2', 'border': 1, 'align': 'center'})
+                        
+                        current_row = 0
+                        for i in range(0, len(cal_dates), 7):
+                            week_dates = cal_dates[i : i+7]
+                            worksheet.write(current_row, 0, "講", header_fmt)
+                            for col_idx, d_obj in enumerate(week_dates):
+                                worksheet.write(current_row, col_idx + 1, d_obj.strftime("%m/%d(%a)"), header_fmt)
+                            for p in range(1, 7):
+                                row_idx = current_row + p
+                                worksheet.write(row_idx, 0, p, wrap_fmt)
+                                for col_idx, d_obj in enumerate(week_dates):
+                                    assigned = schedule_map.get((d_obj, p), [])
+                                    cell_text = "\n".join(assigned) if assigned else ("" if p in get_open_periods(d_obj) else "×")
+                                    worksheet.write(row_idx, col_idx + 1, cell_text, wrap_fmt)
+                            current_row += 8
+                        worksheet.set_column(0, 0, 5); worksheet.set_column(1, 7, 18)
+                        
+                        if unscheduled: pd.DataFrame(unscheduled).to_excel(writer, sheet_name="未消化リスト", index=False)
+
+                    st.download_button(
+                        label="📥 結果をExcelで保存",
+                        data=output.getvalue(),
+                        file_name=f"完成時間割_{teacher_name}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+                except Exception as e:
+                    st.error(f"エラーが発生しました: {e}")
